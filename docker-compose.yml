@@ -1,0 +1,63 @@
+# Local development only (ADR-009's "local" environment: Docker Compose with PostgreSQL,
+# so no cloud dependency for development). `docker compose up` should take an empty
+# environment to a working database with reference data through a single
+# `alembic upgrade head` — see db/README.md for exactly what that command does and why.
+#
+# All containers are named with the `cineatelie` prefix.
+
+services:
+  db:
+    image: postgres:15
+    container_name: cineatelie-db
+    environment:
+      # Postgres's own bootstrap makes POSTGRES_USER a superuser on first start — using
+      # app_migrator here sidesteps the chicken-and-egg problem of "who creates
+      # app_migrator before it exists to run the baseline" that every other environment
+      # solves with db/roles/app_migrator.sql instead. See db/README.md.
+      POSTGRES_USER: app_migrator
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:-app_migrator_dev_password}
+      POSTGRES_DB: cineatelie
+    ports:
+      - "5432:5432"
+    volumes:
+      - cineatelie_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app_migrator -d cineatelie"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  migrate:
+    build: .
+    container_name: cineatelie-migrate
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      MIGRATION_DATABASE_URL: postgresql+psycopg://app_migrator:${POSTGRES_SUPERUSER_PASSWORD:-app_migrator_dev_password}@db:5432/cineatelie
+      # Read once, by revision 0001, to give app_user/app_worker a usable password —
+      # see db/versions/20260926_0001_baseline.py. Not used by any later migration.
+      APP_USER_PASSWORD: ${APP_USER_PASSWORD:-app_user_dev_password}
+      APP_WORKER_PASSWORD: ${APP_WORKER_PASSWORD:-app_worker_dev_password}
+    command: ["alembic", "upgrade", "head"]
+
+  api:
+    build: .
+    container_name: cineatelie-api
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      APP_ENV: local
+      LOG_LEVEL: DEBUG
+      DATABASE_URL: postgresql+asyncpg://app_user:${APP_USER_PASSWORD:-app_user_dev_password}@db:5432/cineatelie
+      # Empty: local dev calls the API directly (http://localhost:8000), not through the
+      # frontend's same-origin proxy, so CORS is needed here even though production isn't
+      # meant to need it (launch dependency A0).
+      CORS_ALLOWED_ORIGINS: http://localhost:5173
+    ports:
+      - "8000:8000"
+
+volumes:
+  cineatelie_pgdata:
+    name: cineatelie_pgdata

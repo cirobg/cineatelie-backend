@@ -1,0 +1,18 @@
+-- =====================================================================================
+-- Local-only demo data — NEVER run against production (ADR-017, database spec §8.1).
+-- =====================================================================================
+-- Deliberately empty in M0. A demo tenant needs a user, a membership, a subscription and
+-- the per-tenant reference rows (document counters, card fees, finance categories,
+-- contract templates) — exactly what WF-01's provisioning transaction produces
+-- (spec-20260920-backend.md, "WF-01 — Tenant provisioning"). Hand-writing that here would
+-- duplicate WF-01's logic in SQL and risk drifting from it the first time either one
+-- changes; the correct producer of a demo tenant is a call to the real provisioning use
+-- case (`modules/identity`), landing in M1.
+--
+-- Once M1 ships, this file becomes a bootstrap script (or a `make demo-seed` target) that
+-- calls the application's provisioning endpoint/use case for a fixed demo user, not a raw
+-- INSERT script — so it can never fall out of sync with what a real signup does.
+--
+-- The deploy workflow must refuse this file in production regardless of its contents;
+-- see the CI guard in .github/workflows/ci.yml and the note in db/README.md.
+SELECT 1; -- no-op placeholder; keeps the file a valid, harmless SQL script until M1

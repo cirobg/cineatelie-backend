@@ -1,0 +1,53 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: app_migrator
+          POSTGRES_PASSWORD: app_migrator_ci_password
+          POSTGRES_DB: cineatelie
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U app_migrator -d cineatelie"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      MIGRATION_DATABASE_URL: postgresql+psycopg://app_migrator:app_migrator_ci_password@localhost:5432/cineatelie
+      APP_USER_PASSWORD: app_user_ci_password
+      APP_WORKER_PASSWORD: app_worker_ci_password
+      DATABASE_URL: postgresql+asyncpg://app_user:app_user_ci_password@localhost:5432/cineatelie
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      - name: Lint
+        run: ruff check src tests
+
+      # Database spec §8.2 step 4: "Confirm `alembic upgrade head` from an empty database
+      # succeeds in CI on a throwaway PostgreSQL." This is that check.
+      - name: Migrate — start PostgreSQL, apply the baseline, from empty
+        run: alembic upgrade head
+
+      - name: Test
+        run: pytest
