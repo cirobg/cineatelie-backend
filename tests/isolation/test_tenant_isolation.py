@@ -50,7 +50,7 @@ async def test_tenant_sees_only_its_own_row(
 async def test_wrong_tenant_context_sees_nothing_even_by_direct_id(
     session_factory: async_sessionmaker, tenant_a: TenantFixture, tenant_b: TenantFixture
 ) -> None:
-    """"By direct id" (OAC-DB-05): querying tenant B's own id, under tenant A's context."""
+    """ "By direct id" (OAC-DB-05): querying tenant B's own id, under tenant A's context."""
     async with UnitOfWork(session_factory, tenant_id=tenant_a.id) as uow:
         result = await uow.session.execute(
             text("SELECT id FROM tenants WHERE id = :id"), {"id": str(tenant_b.id)}
@@ -61,7 +61,7 @@ async def test_wrong_tenant_context_sees_nothing_even_by_direct_id(
 async def test_wrong_tenant_context_sees_nothing_by_filter(
     session_factory: async_sessionmaker, tenant_a: TenantFixture, tenant_b: TenantFixture
 ) -> None:
-    """"By filter" (OAC-DB-05): a WHERE clause naming tenant B cannot override RLS — the
+    """ "By filter" (OAC-DB-05): a WHERE clause naming tenant B cannot override RLS — the
     policy's own predicate is ANDed in regardless of what the query itself asks for."""
     async with UnitOfWork(session_factory, tenant_id=tenant_a.id) as uow:
         result = await uow.session.execute(

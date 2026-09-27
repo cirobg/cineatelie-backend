@@ -1813,8 +1813,29 @@ AS $fn$
      ORDER BY m.is_default DESC, t.trade_name;
 $fn$;
 
-REVOKE EXECUTE ON FUNCTION fn_tenant_members(uuid), fn_my_tenants() FROM PUBLIC;
-GRANT  EXECUTE ON FUNCTION fn_tenant_members(uuid), fn_my_tenants() TO app_user;
+-- Login-time identity resolution (ADR-001 addendum, 2026-09-27; ADR-006 BR-ID-01): given a
+-- verified JWT's (provider, subject), which platform user_id does it belong to? Runs before
+-- app.current_user_id is known -- that is exactly why it must be SECURITY DEFINER:
+-- user_identities_self's own policy is keyed on current_user_id(), so an ordinary app_user
+-- query can never see the very row needed to learn what to set current_user_id() to. Takes
+-- only a (provider, provider_subject) pair -- never anything from a request body -- and
+-- returns only a uuid, matching fn_tenant_members/fn_my_tenants's shape and risk profile
+-- exactly.
+CREATE OR REPLACE FUNCTION fn_resolve_user_identity(p_provider text, p_provider_subject text)
+RETURNS uuid
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = cineatelie, extensions
+AS $fn$
+    SELECT user_id
+      FROM user_identities
+     WHERE provider = p_provider
+       AND provider_subject = p_provider_subject;
+$fn$;
+
+REVOKE EXECUTE ON FUNCTION fn_tenant_members(uuid), fn_my_tenants(), fn_resolve_user_identity(text, text) FROM PUBLIC;
+GRANT  EXECUTE ON FUNCTION fn_tenant_members(uuid), fn_my_tenants(), fn_resolve_user_identity(text, text) TO app_user;
 
 -- -------------------------------------------------------------------------------------
 -- 16. Session defaults / non-blocking guardrails (ADR-003)
