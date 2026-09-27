@@ -4,6 +4,14 @@ This backend owns the schema outright (ADR-017 §3.1): nothing else connects to 
 database, so the schema, the models that reflect it, and the code that uses it are one
 repository, reviewed as one change.
 
+Every table, function and view lives in one Postgres schema, `cineatelie` — never `public`
+(ADR-001, owner decision 2026-09-27). `search_path` is set to `cineatelie` for `app_user`,
+`app_worker` and `app_migrator`, so ordinary unqualified SQL works exactly as it would
+against `public`; the only place this is visible day to day is that `psql`'s `\dt` needs
+`\dt cineatelie.*` to see anything. Alembic's own bookkeeping table is explicitly pinned
+there too (`version_table_schema` in `db/env.py`) rather than left to resolve implicitly —
+see that file's docstring for why the naive version broke on the very first real run.
+
 ## Layout
 
 ```

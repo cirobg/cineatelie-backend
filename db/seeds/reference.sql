@@ -7,6 +7,7 @@
 -- e.g. in CI, or when a new environment is provisioned from an already-migrated dump.
 -- =====================================================================================
 
+SET search_path = cineatelie;
 BEGIN;
 
 INSERT INTO roles (code, label_pt_br, description, sort_order) VALUES

@@ -1,4 +1,4 @@
-"""ADR-002 — must match `app.uuid_generate_v7()` bit-for-bit: version nibble `0111`,
+"""ADR-002 — must match `cineatelie.uuid_generate_v7()` bit-for-bit: version nibble `0111`,
 variant bits `10`, 48-bit millisecond timestamp prefix, time-ordered.
 """
 

@@ -5,7 +5,7 @@
 -- Conventions
 --   * All identifiers, comments and code are in English. End-user facing STRINGS stored
 --     as reference/seed data are in pt-BR, because the UI is pt-BR (see spec docs).
---   * Primary keys: UUIDv7 (time-ordered) generated application-side or by app.uuid_generate_v7().
+--   * Primary keys: UUIDv7 (time-ordered) generated application-side or by cineatelie.uuid_generate_v7().
 --   * Money: NUMERIC(14,2). Quantities: NUMERIC(14,3). Percentages: NUMERIC(7,4).
 --   * Timestamps: TIMESTAMPTZ, always UTC. Business dates: DATE (tenant timezone applied
 --     by the backend before persisting).
@@ -21,15 +21,25 @@ BEGIN;
 -- -------------------------------------------------------------------------------------
 -- 0. Extensions & shared helpers
 -- -------------------------------------------------------------------------------------
+CREATE SCHEMA IF NOT EXISTS cineatelie;
+
+-- Everything below — extensions included — resolves into this schema by default for the
+-- rest of this script (this SET is session-scoped, not persisted — see the per-role SET
+-- further down for what makes it stick for every future connection as
+-- app_user/app_worker/app_migrator). The schema must exist and be on the search_path
+-- *before* CREATE EXTENSION runs, or citext/pgcrypto/btree_gist install into `public`
+-- instead — found by actually running this against a live Postgres: with `public` no
+-- longer on the path, `citext NOT NULL` on the very first table failed with
+-- "type citext does not exist", because the type had been created a schema away.
+SET search_path = cineatelie;
+
 CREATE EXTENSION IF NOT EXISTS pgcrypto;   -- gen_random_bytes, digest, PGP column encryption
 CREATE EXTENSION IF NOT EXISTS citext;     -- case-insensitive e-mail
 CREATE EXTENSION IF NOT EXISTS btree_gist; -- exclusion constraints (subscription windows)
 
-CREATE SCHEMA IF NOT EXISTS app;
-
 -- UUIDv7 (RFC 9562) generator. Kept in the DB so that manual inserts / migrations
 -- produce the same key shape the application does. See ADR-002.
-CREATE OR REPLACE FUNCTION app.uuid_generate_v7()
+CREATE OR REPLACE FUNCTION cineatelie.uuid_generate_v7()
 RETURNS uuid
 LANGUAGE plpgsql
 VOLATILE
@@ -59,7 +69,7 @@ $fn$;
 
 -- Current tenant from the request-scoped GUC set by the API middleware
 -- (SET LOCAL app.current_tenant_id = '<uuid>'). Returns NULL when unset.
-CREATE OR REPLACE FUNCTION app.current_tenant_id()
+CREATE OR REPLACE FUNCTION cineatelie.current_tenant_id()
 RETURNS uuid
 LANGUAGE sql
 STABLE
@@ -67,7 +77,7 @@ AS $fn$
     SELECT NULLIF(current_setting('app.current_tenant_id', true), '')::uuid;
 $fn$;
 
-CREATE OR REPLACE FUNCTION app.current_user_id()
+CREATE OR REPLACE FUNCTION cineatelie.current_user_id()
 RETURNS uuid
 LANGUAGE sql
 STABLE
@@ -76,7 +86,7 @@ AS $fn$
 $fn$;
 
 -- Generic updated_at trigger
-CREATE OR REPLACE FUNCTION app.touch_updated_at()
+CREATE OR REPLACE FUNCTION cineatelie.touch_updated_at()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $fn$
@@ -89,13 +99,13 @@ $fn$;
 -- Guard: a row must never be written with a tenant_id different from the session tenant.
 -- RLS already enforces this; the trigger produces a clearer error and also covers
 -- maintenance sessions that forget to scope.
-CREATE OR REPLACE FUNCTION app.assert_tenant_matches()
+CREATE OR REPLACE FUNCTION cineatelie.assert_tenant_matches()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $fn$
 BEGIN
-    IF app.current_tenant_id() IS NOT NULL AND NEW.tenant_id IS DISTINCT FROM app.current_tenant_id() THEN
-        RAISE EXCEPTION 'tenant_id mismatch: row=% session=%', NEW.tenant_id, app.current_tenant_id()
+    IF cineatelie.current_tenant_id() IS NOT NULL AND NEW.tenant_id IS DISTINCT FROM cineatelie.current_tenant_id() THEN
+        RAISE EXCEPTION 'tenant_id mismatch: row=% session=%', NEW.tenant_id, cineatelie.current_tenant_id()
             USING ERRCODE = '42501';
     END IF;
     RETURN NEW;
@@ -103,7 +113,7 @@ END;
 $fn$;
 
 -- Append-only guard, strict. Used for financial ledgers that must never be pruned.
-CREATE OR REPLACE FUNCTION app.forbid_write()
+CREATE OR REPLACE FUNCTION cineatelie.forbid_write()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $fn$
@@ -118,7 +128,7 @@ $fn$;
 --   SET LOCAL app.retention_sweep = 'on'
 -- which only the scheduled retention job does. Without this, the append-only trigger
 -- would block the LGPD retention sweep on audit_log.
-CREATE OR REPLACE FUNCTION app.append_only_with_retention()
+CREATE OR REPLACE FUNCTION cineatelie.append_only_with_retention()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $fn$
@@ -139,7 +149,7 @@ $fn$;
 
 -- A human being. Decoupled from any authentication provider (ADR-005).
 CREATE TABLE users (
-    id                uuid PRIMARY KEY DEFAULT app.uuid_generate_v7(),
+    id                uuid PRIMARY KEY DEFAULT cineatelie.uuid_generate_v7(),
     email             citext NOT NULL,
     full_name         text NOT NULL,
     avatar_url        text,
@@ -159,7 +169,7 @@ COMMENT ON TABLE users IS
 -- One row per (provider, subject). Enables adding providers or migrating the auth
 -- engine (Supabase Auth -> Ory/Keycloak) without touching domain tables.
 CREATE TABLE user_identities (
-    id                 uuid PRIMARY KEY DEFAULT app.uuid_generate_v7(),
+    id                 uuid PRIMARY KEY DEFAULT cineatelie.uuid_generate_v7(),
     user_id            uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     provider           text NOT NULL CHECK (provider IN ('google','supabase','keycloak','ory','apple')),
     provider_subject   text NOT NULL,          -- e.g. the immutable Google "sub"
@@ -177,7 +187,7 @@ CREATE INDEX user_identities_user_idx ON user_identities (user_id);
 -- -------------------------------------------------------------------------------------
 
 CREATE TABLE tenants (
-    id                 uuid PRIMARY KEY DEFAULT app.uuid_generate_v7(),
+    id                 uuid PRIMARY KEY DEFAULT cineatelie.uuid_generate_v7(),
     slug               text NOT NULL,
     trade_name         text NOT NULL,                 -- "Cine Ateliê"
     legal_name         text,
@@ -231,7 +241,7 @@ CREATE TABLE role_permissions (
 );
 
 CREATE TABLE memberships (
-    id            uuid PRIMARY KEY DEFAULT app.uuid_generate_v7(),
+    id            uuid PRIMARY KEY DEFAULT cineatelie.uuid_generate_v7(),
     tenant_id     uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     user_id       uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     role_code     text NOT NULL REFERENCES roles(code),
@@ -254,7 +264,7 @@ CREATE INDEX memberships_owner_idx  ON memberships (tenant_id)
     WHERE role_code = 'owner' AND status = 'active';
 
 CREATE TABLE tenant_invitations (
-    id            uuid PRIMARY KEY DEFAULT app.uuid_generate_v7(),
+    id            uuid PRIMARY KEY DEFAULT cineatelie.uuid_generate_v7(),
     tenant_id     uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     email         citext NOT NULL,
     role_code     text NOT NULL REFERENCES roles(code),
@@ -306,7 +316,7 @@ CREATE TABLE plan_features (
 -- A tenant's entitlement window. History is kept; at most one row may be active on a
 -- given day, enforced by the exclusion constraint.
 CREATE TABLE subscriptions (
-    id                       uuid PRIMARY KEY DEFAULT app.uuid_generate_v7(),
+    id                       uuid PRIMARY KEY DEFAULT cineatelie.uuid_generate_v7(),
     tenant_id                uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     plan_code                text NOT NULL REFERENCES plans(code),
     status                   text NOT NULL DEFAULT 'active'
@@ -395,7 +405,7 @@ CREATE TABLE tenant_feature_overrides (
 );
 
 CREATE TABLE billing_invoices (
-    id               uuid PRIMARY KEY DEFAULT app.uuid_generate_v7(),
+    id               uuid PRIMARY KEY DEFAULT cineatelie.uuid_generate_v7(),
     tenant_id        uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     subscription_id  uuid REFERENCES subscriptions(id) ON DELETE SET NULL,
     provider         text NOT NULL,
@@ -414,7 +424,7 @@ CREATE INDEX billing_invoices_tenant_idx ON billing_invoices (tenant_id, issued_
 
 -- Raw inbound webhooks, stored before parsing, for idempotency and audit (ADR-014).
 CREATE TABLE webhook_events (
-    id                   uuid PRIMARY KEY DEFAULT app.uuid_generate_v7(),
+    id                   uuid PRIMARY KEY DEFAULT cineatelie.uuid_generate_v7(),
     provider             text NOT NULL,
     external_event_id    text NOT NULL,
     event_type           text,
@@ -470,7 +480,7 @@ COMMENT ON TABLE document_counters IS
   'Single-row lock held until commit. Never use MAX(number)+1.';
 
 CREATE TABLE card_fees (
-    id            uuid PRIMARY KEY DEFAULT app.uuid_generate_v7(),
+    id            uuid PRIMARY KEY DEFAULT cineatelie.uuid_generate_v7(),
     tenant_id     uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     installments  smallint NOT NULL CHECK (installments BETWEEN 1 AND 24),
     fee_pct       numeric(7,4) NOT NULL CHECK (fee_pct >= 0),
@@ -486,7 +496,7 @@ CREATE INDEX card_fees_lookup_idx ON card_fees (tenant_id, installments, valid_f
 -- sits here rather than with the documents that use it: quotes reference it, and so do
 -- attachments when the atelier uploads its own PDF instead of typing one.
 CREATE TABLE contract_templates (
-    id             uuid PRIMARY KEY DEFAULT app.uuid_generate_v7(),
+    id             uuid PRIMARY KEY DEFAULT cineatelie.uuid_generate_v7(),
     tenant_id      uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     document_type  text NOT NULL CHECK (document_type IN ('sob_medida','ajuste_conserto','venda','aluguel')),
     title          text NOT NULL,
@@ -512,7 +522,7 @@ CREATE TABLE contract_templates (
 -- -------------------------------------------------------------------------------------
 
 CREATE TABLE clients (
-    id                uuid PRIMARY KEY DEFAULT app.uuid_generate_v7(),
+    id                uuid PRIMARY KEY DEFAULT cineatelie.uuid_generate_v7(),
     tenant_id         uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     full_name         text NOT NULL,
     phone             text,
@@ -564,7 +574,7 @@ COMMENT ON TABLE measurement_fields IS
 -- One row per sheet version. Never updated in place: a new fitting creates a new version,
 -- so the atelier keeps each client body history.
 CREATE TABLE client_measurements (
-    id             uuid PRIMARY KEY DEFAULT app.uuid_generate_v7(),
+    id             uuid PRIMARY KEY DEFAULT cineatelie.uuid_generate_v7(),
     tenant_id      uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     client_id      uuid NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
     version        integer NOT NULL,
@@ -587,7 +597,7 @@ CREATE INDEX client_measurements_tenant_idx
 -- -------------------------------------------------------------------------------------
 
 CREATE TABLE service_types (
-    id             uuid PRIMARY KEY DEFAULT app.uuid_generate_v7(),
+    id             uuid PRIMARY KEY DEFAULT cineatelie.uuid_generate_v7(),
     tenant_id      uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     name           text NOT NULL,                       -- "Sob medida — Noiva", "Barra italiana"
     category       text NOT NULL CHECK (category IN ('sob_medida','ajuste_conserto')),
@@ -612,7 +622,7 @@ CREATE TABLE service_types (
 CREATE INDEX service_types_tenant_idx ON service_types (tenant_id, category) WHERE deleted_at IS NULL;
 
 CREATE TABLE suppliers (
-    id             uuid PRIMARY KEY DEFAULT app.uuid_generate_v7(),
+    id             uuid PRIMARY KEY DEFAULT cineatelie.uuid_generate_v7(),
     tenant_id      uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     number         bigint NOT NULL,             -- rendered "FOR-01" by the API
     name           text NOT NULL,
@@ -636,7 +646,7 @@ CREATE INDEX suppliers_tenant_idx ON suppliers (tenant_id) WHERE deleted_at IS N
 -- "Estoque e Insumos". quantity_on_hand is a denormalised projection of stock_movements,
 -- maintained by trigger so the board and quote editor never SUM over the ledger.
 CREATE TABLE materials (
-    id                  uuid PRIMARY KEY DEFAULT app.uuid_generate_v7(),
+    id                  uuid PRIMARY KEY DEFAULT cineatelie.uuid_generate_v7(),
     tenant_id           uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     name                text NOT NULL,
     sku                 text,                         -- "MUS-01"
@@ -659,7 +669,7 @@ CREATE INDEX materials_low_stock_idx ON materials (tenant_id)
     WHERE deleted_at IS NULL AND quantity_on_hand <= minimum_quantity;
 
 CREATE TABLE material_cost_history (
-    id            uuid PRIMARY KEY DEFAULT app.uuid_generate_v7(),
+    id            uuid PRIMARY KEY DEFAULT cineatelie.uuid_generate_v7(),
     tenant_id     uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     material_id   uuid NOT NULL REFERENCES materials(id) ON DELETE CASCADE,
     changed_on    date NOT NULL DEFAULT CURRENT_DATE,
@@ -674,7 +684,7 @@ CREATE INDEX material_cost_history_idx ON material_cost_history (tenant_id, mate
 
 -- Append-only stock ledger. quantity is SIGNED: positive = in, negative = out.
 CREATE TABLE stock_movements (
-    id              uuid PRIMARY KEY DEFAULT app.uuid_generate_v7(),
+    id              uuid PRIMARY KEY DEFAULT cineatelie.uuid_generate_v7(),
     tenant_id       uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     material_id     uuid NOT NULL REFERENCES materials(id) ON DELETE RESTRICT,
     movement_type   text NOT NULL CHECK (movement_type IN
@@ -703,7 +713,7 @@ CREATE INDEX stock_movements_reference_idx ON stock_movements (tenant_id, refere
 -- Occupancy (committed on a live quote, or out on an active rental) is therefore DERIVED
 -- from quote_items joined to service_orders — see v_rtw_availability — and never stored.
 CREATE TABLE ready_to_wear_items (
-    id              uuid PRIMARY KEY DEFAULT app.uuid_generate_v7(),
+    id              uuid PRIMARY KEY DEFAULT cineatelie.uuid_generate_v7(),
     tenant_id       uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     name            text NOT NULL,
     category        text,                              -- Vestido, Véu, Acessório
@@ -726,7 +736,7 @@ CREATE INDEX rtw_tenant_idx ON ready_to_wear_items (tenant_id) WHERE deleted_at 
 -- this, units_total was edited with no recorded reason — you could see *that* it changed
 -- in audit_log, but not why, unlike a material balance.
 CREATE TABLE rtw_movements (
-    id             uuid PRIMARY KEY DEFAULT app.uuid_generate_v7(),
+    id             uuid PRIMARY KEY DEFAULT cineatelie.uuid_generate_v7(),
     tenant_id      uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     item_id        uuid NOT NULL REFERENCES ready_to_wear_items(id) ON DELETE RESTRICT,
     movement_type  text NOT NULL CHECK (movement_type IN
@@ -743,7 +753,7 @@ CREATE TABLE rtw_movements (
 CREATE INDEX rtw_movements_item_idx ON rtw_movements (tenant_id, item_id, occurred_at DESC);
 
 CREATE TABLE rtw_price_history (
-    id          uuid PRIMARY KEY DEFAULT app.uuid_generate_v7(),
+    id          uuid PRIMARY KEY DEFAULT cineatelie.uuid_generate_v7(),
     tenant_id   uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     item_id     uuid NOT NULL REFERENCES ready_to_wear_items(id) ON DELETE CASCADE,
     price_type  text NOT NULL CHECK (price_type IN ('venda','aluguel')),
@@ -756,7 +766,7 @@ CREATE TABLE rtw_price_history (
 CREATE INDEX rtw_price_history_idx ON rtw_price_history (tenant_id, item_id, changed_on DESC);
 
 -- Same shape as materials: the cached count is a projection of the ledger.
-CREATE OR REPLACE FUNCTION app.apply_rtw_movement()
+CREATE OR REPLACE FUNCTION cineatelie.apply_rtw_movement()
 RETURNS trigger LANGUAGE plpgsql AS $fn$
 BEGIN
     UPDATE ready_to_wear_items
@@ -770,10 +780,10 @@ END;
 $fn$;
 CREATE TRIGGER rtw_movements_apply
     AFTER INSERT ON rtw_movements
-    FOR EACH ROW EXECUTE FUNCTION app.apply_rtw_movement();
+    FOR EACH ROW EXECUTE FUNCTION cineatelie.apply_rtw_movement();
 CREATE TRIGGER rtw_movements_immutable
     BEFORE UPDATE OR DELETE ON rtw_movements
-    FOR EACH ROW EXECUTE FUNCTION app.forbid_write();
+    FOR EACH ROW EXECUTE FUNCTION cineatelie.forbid_write();
 COMMENT ON COLUMN ready_to_wear_items.units_total IS
   'Units owned. Delivering a VENDA order decrements this (the piece leaves permanently); '
   'delivering an ALUGUEL order does not. Deliberately simpler than the materials ledger: '
@@ -785,7 +795,7 @@ COMMENT ON COLUMN ready_to_wear_items.units_total IS
 -- -------------------------------------------------------------------------------------
 
 CREATE TABLE quotes (
-    id                    uuid PRIMARY KEY DEFAULT app.uuid_generate_v7(),
+    id                    uuid PRIMARY KEY DEFAULT cineatelie.uuid_generate_v7(),
     tenant_id             uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     number                bigint NOT NULL,                       -- rendered "ORC-0025"
     client_id             uuid NOT NULL REFERENCES clients(id) ON DELETE RESTRICT,
@@ -836,7 +846,7 @@ CREATE INDEX quotes_tenant_status_idx ON quotes (tenant_id, status, issued_on DE
 CREATE INDEX quotes_client_idx        ON quotes (tenant_id, client_id)              WHERE deleted_at IS NULL;
 
 CREATE TABLE quote_items (
-    id               uuid PRIMARY KEY DEFAULT app.uuid_generate_v7(),
+    id               uuid PRIMARY KEY DEFAULT cineatelie.uuid_generate_v7(),
     tenant_id        uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     quote_id         uuid NOT NULL REFERENCES quotes(id) ON DELETE CASCADE,
     line_no          smallint NOT NULL,
@@ -872,7 +882,7 @@ CREATE INDEX quote_items_rtw_idx   ON quote_items (tenant_id, ready_to_wear_item
 -- which was an unnecessary integrity gap: nothing in quotes references stock_reservations,
 -- so there was never a genuine circular dependency — only file ordering (closed OI-DB-05).
 CREATE TABLE stock_reservations (
-    id              uuid PRIMARY KEY DEFAULT app.uuid_generate_v7(),
+    id              uuid PRIMARY KEY DEFAULT cineatelie.uuid_generate_v7(),
     tenant_id       uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     material_id     uuid NOT NULL REFERENCES materials(id) ON DELETE RESTRICT,
     quote_id        uuid NOT NULL REFERENCES quotes(id) ON DELETE CASCADE,
@@ -891,7 +901,7 @@ CREATE INDEX stock_reservations_quote_idx ON stock_reservations (tenant_id, quot
 
 -- Server-side autosave of the quote editor, so nothing is lost if the tab closes.
 CREATE TABLE quote_drafts (
-    id           uuid PRIMARY KEY DEFAULT app.uuid_generate_v7(),
+    id           uuid PRIMARY KEY DEFAULT cineatelie.uuid_generate_v7(),
     tenant_id    uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     user_id      uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     quote_id     uuid REFERENCES quotes(id) ON DELETE CASCADE,  -- NULL = brand-new quote
@@ -908,7 +918,7 @@ CREATE INDEX quote_drafts_expiry_idx ON quote_drafts (expires_at);
 -- -------------------------------------------------------------------------------------
 
 CREATE TABLE service_orders (
-    id                   uuid PRIMARY KEY DEFAULT app.uuid_generate_v7(),
+    id                   uuid PRIMARY KEY DEFAULT cineatelie.uuid_generate_v7(),
     tenant_id            uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     number               bigint NOT NULL,                       -- rendered "OS-0035"
     quote_id             uuid REFERENCES quotes(id) ON DELETE SET NULL,
@@ -958,7 +968,7 @@ CREATE INDEX service_orders_history_idx
     ON service_orders (tenant_id, delivered_at DESC) WHERE stage IN ('entregue','cancelado');
 
 CREATE TABLE service_order_stage_history (
-    id                 uuid PRIMARY KEY DEFAULT app.uuid_generate_v7(),
+    id                 uuid PRIMARY KEY DEFAULT cineatelie.uuid_generate_v7(),
     tenant_id          uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     service_order_id   uuid NOT NULL REFERENCES service_orders(id) ON DELETE CASCADE,
     from_stage         text,
@@ -980,7 +990,7 @@ CREATE INDEX so_stage_history_idx
 -- atelier's own PDF contract, and quota enforcement needs a
 -- single place to count and sum (BR-ATT-01). Exactly one owner column is non-null.
 CREATE TABLE attachments (
-    id                    uuid PRIMARY KEY DEFAULT app.uuid_generate_v7(),
+    id                    uuid PRIMARY KEY DEFAULT cineatelie.uuid_generate_v7(),
     tenant_id             uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     service_order_id      uuid REFERENCES service_orders(id) ON DELETE CASCADE,
     ready_to_wear_item_id uuid REFERENCES ready_to_wear_items(id) ON DELETE CASCADE,
@@ -1023,7 +1033,7 @@ CREATE INDEX attachments_tenant_size_idx
 -- -------------------------------------------------------------------------------------
 
 CREATE TABLE appointments (
-    id                uuid PRIMARY KEY DEFAULT app.uuid_generate_v7(),
+    id                uuid PRIMARY KEY DEFAULT cineatelie.uuid_generate_v7(),
     tenant_id         uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     title             text NOT NULL,
     notes             text,
@@ -1052,7 +1062,7 @@ CREATE INDEX appointments_order_idx
 -- -------------------------------------------------------------------------------------
 
 CREATE TABLE finance_categories (
-    id           uuid PRIMARY KEY DEFAULT app.uuid_generate_v7(),
+    id           uuid PRIMARY KEY DEFAULT cineatelie.uuid_generate_v7(),
     tenant_id    uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     name         text NOT NULL,                 -- "Compra de material", "Taxas de cartão"
     direction    text NOT NULL CHECK (direction IN ('receita','despesa','ambos')),
@@ -1065,7 +1075,7 @@ CREATE TABLE finance_categories (
 -- "Em atraso" is DERIVED, never stored: an unpaid entry whose due_date precedes the
 -- first day of the month being viewed. See ADR-012 and fn_cash_flow_month below.
 CREATE TABLE finance_entries (
-    id                  uuid PRIMARY KEY DEFAULT app.uuid_generate_v7(),
+    id                  uuid PRIMARY KEY DEFAULT cineatelie.uuid_generate_v7(),
     tenant_id           uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     direction           text NOT NULL CHECK (direction IN ('receita','despesa')),
     description         text NOT NULL,
@@ -1110,7 +1120,7 @@ CREATE INDEX finance_entries_order_idx ON finance_entries (tenant_id, service_or
 -- -------------------------------------------------------------------------------------
 
 CREATE TABLE receipts (
-    id                uuid PRIMARY KEY DEFAULT app.uuid_generate_v7(),
+    id                uuid PRIMARY KEY DEFAULT cineatelie.uuid_generate_v7(),
     tenant_id         uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     number            bigint NOT NULL,                  -- rendered "REC-0142"
     client_id         uuid NOT NULL REFERENCES clients(id) ON DELETE RESTRICT,
@@ -1131,7 +1141,7 @@ CREATE TABLE receipts (
 CREATE INDEX receipts_tenant_idx ON receipts (tenant_id, issued_on DESC) WHERE deleted_at IS NULL;
 
 CREATE TABLE receipt_items (
-    id           uuid PRIMARY KEY DEFAULT app.uuid_generate_v7(),
+    id           uuid PRIMARY KEY DEFAULT cineatelie.uuid_generate_v7(),
     tenant_id    uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     receipt_id   uuid NOT NULL REFERENCES receipts(id) ON DELETE CASCADE,
     line_no      smallint NOT NULL,
@@ -1158,7 +1168,7 @@ CREATE TABLE receipt_items (
 -- No foreign keys on tenant_id / actor_user_id either: an audit row must survive the
 -- deletion of the tenant or user it describes, which is the whole point of an audit trail.
 CREATE TABLE audit_log (
-    id             uuid NOT NULL DEFAULT app.uuid_generate_v7(),
+    id             uuid NOT NULL DEFAULT cineatelie.uuid_generate_v7(),
     tenant_id      uuid,
     actor_user_id  uuid,
     actor_role     text,
@@ -1193,14 +1203,14 @@ CREATE TABLE audit_log_default PARTITION OF audit_log DEFAULT;
 -- SECURITY DEFINER: creating and dropping partitions requires CREATE on the schema and
 -- ownership of the partition, neither of which app_worker has (nor should have). These two
 -- functions are the only sanctioned path, and both are granted to app_worker alone.
-CREATE OR REPLACE FUNCTION app.ensure_audit_log_partitions(
+CREATE OR REPLACE FUNCTION cineatelie.ensure_audit_log_partitions(
     p_months_ahead int DEFAULT 3,
     p_months_back  int DEFAULT 1
 )
 RETURNS int
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = public, app
+SET search_path = cineatelie
 AS $fn$
 DECLARE
     m           date;
@@ -1228,11 +1238,11 @@ $fn$;
 
 -- Retention by partition drop. Drops every whole monthly partition that ends on or before
 -- the cutoff. Never touches audit_log_default, and never partially deletes a partition.
-CREATE OR REPLACE FUNCTION app.drop_audit_log_partitions_before(p_cutoff date)
+CREATE OR REPLACE FUNCTION cineatelie.drop_audit_log_partitions_before(p_cutoff date)
 RETURNS int
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = public, app
+SET search_path = cineatelie
 AS $fn$
 DECLARE
     r        record;
@@ -1258,14 +1268,14 @@ END;
 $fn$;
 
 -- Seed the initial partitions so the schema is usable immediately.
-SELECT app.ensure_audit_log_partitions(3, 1);
+SELECT cineatelie.ensure_audit_log_partitions(3, 1);
 
 -- Only the worker may manage partitions, and only through these two functions.
-REVOKE EXECUTE ON FUNCTION app.ensure_audit_log_partitions(int, int) FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION app.drop_audit_log_partitions_before(date) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION cineatelie.ensure_audit_log_partitions(int, int) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION cineatelie.drop_audit_log_partitions_before(date) FROM PUBLIC;
 
 CREATE TABLE lgpd_requests (
-    id             uuid PRIMARY KEY DEFAULT app.uuid_generate_v7(),
+    id             uuid PRIMARY KEY DEFAULT cineatelie.uuid_generate_v7(),
     tenant_id      uuid REFERENCES tenants(id) ON DELETE CASCADE,
     subject_type   text NOT NULL CHECK (subject_type IN ('client','user')),
     subject_id     uuid NOT NULL,
@@ -1295,7 +1305,7 @@ CREATE INDEX lgpd_requests_open_idx ON lgpd_requests (status, requested_at);
 -- Rows are GENERATED, never written by a user. They are also disposable: a notification is
 -- a pointer to a fact that lives elsewhere, so pruning one loses nothing.
 CREATE TABLE notifications (
-    id           uuid PRIMARY KEY DEFAULT app.uuid_generate_v7(),
+    id           uuid PRIMARY KEY DEFAULT cineatelie.uuid_generate_v7(),
     tenant_id    uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     -- NULL = for everyone in the workspace. Set = for one person, e.g. an order assigned
     -- to a specific seamstress.
@@ -1324,7 +1334,7 @@ CREATE INDEX notifications_created_idx ON notifications (tenant_id, created_at D
 -- default is 24 hours (RETENTION_IDEMPOTENCY_HOURS), which comfortably covers a client
 -- retry storm or a user double-clicking "Aprovar".
 CREATE TABLE idempotency_records (
-    id              uuid PRIMARY KEY DEFAULT app.uuid_generate_v7(),
+    id              uuid PRIMARY KEY DEFAULT cineatelie.uuid_generate_v7(),
     tenant_id       uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     user_id         uuid REFERENCES users(id) ON DELETE SET NULL,
     idempotency_key text NOT NULL,
@@ -1341,7 +1351,7 @@ CREATE TABLE idempotency_records (
 CREATE INDEX idempotency_records_expiry_idx ON idempotency_records (expires_at);
 
 CREATE TABLE job_queue (
-    id              uuid PRIMARY KEY DEFAULT app.uuid_generate_v7(),
+    id              uuid PRIMARY KEY DEFAULT cineatelie.uuid_generate_v7(),
     tenant_id       uuid REFERENCES tenants(id) ON DELETE CASCADE,
     job_type        text NOT NULL,
     payload         jsonb NOT NULL DEFAULT '{}'::jsonb,
@@ -1379,7 +1389,7 @@ BEGIN
     ] LOOP
         EXECUTE format(
             'CREATE TRIGGER %1$I_touch_updated_at BEFORE UPDATE ON %1$I
-             FOR EACH ROW EXECUTE FUNCTION app.touch_updated_at()', t);
+             FOR EACH ROW EXECUTE FUNCTION cineatelie.touch_updated_at()', t);
     END LOOP;
 END
 $do$;
@@ -1400,13 +1410,13 @@ BEGIN
     ] LOOP
         EXECUTE format(
             'CREATE TRIGGER %1$I_assert_tenant BEFORE INSERT OR UPDATE ON %1$I
-             FOR EACH ROW EXECUTE FUNCTION app.assert_tenant_matches()', t);
+             FOR EACH ROW EXECUTE FUNCTION cineatelie.assert_tenant_matches()', t);
     END LOOP;
 END
 $do$;
 
 -- Keep materials.quantity_on_hand in sync with the append-only ledger.
-CREATE OR REPLACE FUNCTION app.apply_stock_movement()
+CREATE OR REPLACE FUNCTION cineatelie.apply_stock_movement()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $fn$
@@ -1425,19 +1435,19 @@ $fn$;
 
 CREATE TRIGGER stock_movements_apply
     AFTER INSERT ON stock_movements
-    FOR EACH ROW EXECUTE FUNCTION app.apply_stock_movement();
+    FOR EACH ROW EXECUTE FUNCTION cineatelie.apply_stock_movement();
 
 CREATE TRIGGER stock_movements_immutable
     BEFORE UPDATE OR DELETE ON stock_movements
-    FOR EACH ROW EXECUTE FUNCTION app.forbid_write();
+    FOR EACH ROW EXECUTE FUNCTION cineatelie.forbid_write();
 
 -- audit_log is append-only, but the retention sweep must be able to prune aged rows.
 CREATE TRIGGER audit_log_immutable
     BEFORE UPDATE OR DELETE ON audit_log
-    FOR EACH ROW EXECUTE FUNCTION app.append_only_with_retention();
+    FOR EACH ROW EXECUTE FUNCTION cineatelie.append_only_with_retention();
 
 -- Record every Kanban stage transition without the application having to remember.
-CREATE OR REPLACE FUNCTION app.log_service_order_stage()
+CREATE OR REPLACE FUNCTION cineatelie.log_service_order_stage()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $fn$
@@ -1452,7 +1462,7 @@ BEGIN
          CASE WHEN TG_OP = 'UPDATE' THEN OLD.stage END,
          NEW.stage,
          CASE WHEN NEW.stage = 'cancelado' THEN NEW.cancellation_reason END,
-         app.current_user_id());
+         cineatelie.current_user_id());
     NEW.stage_changed_at := now();
     RETURN NEW;
 END;
@@ -1460,7 +1470,7 @@ $fn$;
 
 CREATE TRIGGER service_orders_stage_log
     BEFORE INSERT OR UPDATE OF stage ON service_orders
-    FOR EACH ROW EXECUTE FUNCTION app.log_service_order_stage();
+    FOR EACH ROW EXECUTE FUNCTION cineatelie.log_service_order_stage();
 
 -- -------------------------------------------------------------------------------------
 -- 14. Views and functions used by the UI
@@ -1625,10 +1635,10 @@ BEGIN
 END
 $do$;
 
-GRANT USAGE ON SCHEMA public, app TO app_user;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app_user;
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA app, public TO app_user;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public
+GRANT USAGE ON SCHEMA cineatelie TO app_user;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA cineatelie TO app_user;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA cineatelie TO app_user;
+ALTER DEFAULT PRIVILEGES IN SCHEMA cineatelie
     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_user;
 
 -- Reference tables are read-only for the application.
@@ -1656,8 +1666,8 @@ BEGIN
             CREATE POLICY %1$I_tenant_isolation ON %1$I
             FOR ALL
             TO app_user
-            USING      (tenant_id = app.current_tenant_id())
-            WITH CHECK (tenant_id = app.current_tenant_id())
+            USING      (tenant_id = cineatelie.current_tenant_id())
+            WITH CHECK (tenant_id = cineatelie.current_tenant_id())
         $pol$, t);
     END LOOP;
 END
@@ -1671,15 +1681,15 @@ ALTER TABLE audit_log ENABLE ROW LEVEL SECURITY;
 ALTER TABLE audit_log FORCE  ROW LEVEL SECURITY;
 CREATE POLICY audit_log_tenant_isolation ON audit_log
     FOR ALL TO app_user
-    USING      (tenant_id IS NULL OR tenant_id = app.current_tenant_id())
-    WITH CHECK (tenant_id IS NULL OR tenant_id = app.current_tenant_id());
+    USING      (tenant_id IS NULL OR tenant_id = cineatelie.current_tenant_id())
+    WITH CHECK (tenant_id IS NULL OR tenant_id = cineatelie.current_tenant_id());
 
 ALTER TABLE job_queue ENABLE ROW LEVEL SECURITY;
 ALTER TABLE job_queue FORCE  ROW LEVEL SECURITY;
 CREATE POLICY job_queue_tenant_isolation ON job_queue
     FOR ALL TO app_user
-    USING      (tenant_id IS NULL OR tenant_id = app.current_tenant_id())
-    WITH CHECK (tenant_id IS NULL OR tenant_id = app.current_tenant_id());
+    USING      (tenant_id IS NULL OR tenant_id = cineatelie.current_tenant_id())
+    WITH CHECK (tenant_id IS NULL OR tenant_id = cineatelie.current_tenant_id());
 COMMENT ON POLICY job_queue_tenant_isolation ON job_queue IS
   'Platform-scoped jobs (tenant_id IS NULL) are visible to any session. The worker must still '
   'SET LOCAL app.current_tenant_id before executing a tenant-scoped job, so the job body runs '
@@ -1690,8 +1700,8 @@ ALTER TABLE tenants ENABLE ROW LEVEL SECURITY;
 ALTER TABLE tenants FORCE  ROW LEVEL SECURITY;
 CREATE POLICY tenants_self_isolation ON tenants
     FOR ALL TO app_user
-    USING      (id = app.current_tenant_id())
-    WITH CHECK (id = app.current_tenant_id());
+    USING      (id = cineatelie.current_tenant_id())
+    WITH CHECK (id = cineatelie.current_tenant_id());
 
 -- users / user_identities: a user only ever reads their own row. Team listings are
 -- served through the SECURITY DEFINER function below.
@@ -1699,15 +1709,15 @@ ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE users FORCE  ROW LEVEL SECURITY;
 CREATE POLICY users_self ON users
     FOR ALL TO app_user
-    USING      (id = app.current_user_id())
-    WITH CHECK (id = app.current_user_id());
+    USING      (id = cineatelie.current_user_id())
+    WITH CHECK (id = cineatelie.current_user_id());
 
 ALTER TABLE user_identities ENABLE ROW LEVEL SECURITY;
 ALTER TABLE user_identities FORCE  ROW LEVEL SECURITY;
 CREATE POLICY user_identities_self ON user_identities
     FOR ALL TO app_user
-    USING      (user_id = app.current_user_id())
-    WITH CHECK (user_id = app.current_user_id());
+    USING      (user_id = cineatelie.current_user_id())
+    WITH CHECK (user_id = cineatelie.current_user_id());
 
 -- Team directory for Configurações > Equipe, scoped to the session tenant.
 CREATE OR REPLACE FUNCTION fn_tenant_members(p_tenant_id uuid)
@@ -1718,14 +1728,14 @@ RETURNS TABLE (
 LANGUAGE sql
 STABLE
 SECURITY DEFINER
-SET search_path = public, app
+SET search_path = cineatelie
 AS $fn$
     SELECT m.id, u.id, u.full_name, u.email, m.role_code, r.label_pt_br, m.status, m.accepted_at
       FROM memberships m
       JOIN users u ON u.id = m.user_id
       JOIN roles r ON r.code = m.role_code
      WHERE m.tenant_id = p_tenant_id
-       AND p_tenant_id = app.current_tenant_id()   -- refuse to leak another tenant's team
+       AND p_tenant_id = cineatelie.current_tenant_id()   -- refuse to leak another tenant's team
        AND m.status <> 'revoked'
      ORDER BY r.sort_order, u.full_name;
 $fn$;
@@ -1740,14 +1750,14 @@ RETURNS TABLE (
 LANGUAGE sql
 STABLE
 SECURITY DEFINER
-SET search_path = public, app
+SET search_path = cineatelie
 AS $fn$
     SELECT t.id, t.slug, t.trade_name, t.logo_url, m.role_code, m.is_default,
            s.plan_code, COALESCE(s.is_within_window, false)
       FROM memberships m
       JOIN tenants t ON t.id = m.tenant_id
       LEFT JOIN v_active_subscription s ON s.tenant_id = t.id
-     WHERE m.user_id = app.current_user_id()
+     WHERE m.user_id = cineatelie.current_user_id()
        AND m.status = 'active'
        AND t.deleted_at IS NULL
      ORDER BY m.is_default DESC, t.trade_name;
@@ -1764,7 +1774,11 @@ GRANT  EXECUTE ON FUNCTION fn_tenant_members(uuid), fn_my_tenants() TO app_user;
 ALTER ROLE app_user SET statement_timeout                   = '5000ms';
 ALTER ROLE app_user SET lock_timeout                        = '3000ms';
 ALTER ROLE app_user SET idle_in_transaction_session_timeout = '10000ms';
-ALTER ROLE app_user SET search_path                         = public, app;
+ALTER ROLE app_user SET search_path                         = cineatelie;
+-- app_migrator has no statement/lock timeout override (DDL legitimately runs long,
+-- database spec table "app_migrator | ... | none (DDL)"), but it does need this, so a
+-- *future* migration's unqualified CREATE TABLE also lands in cineatelie by default.
+ALTER ROLE app_migrator SET search_path                    = cineatelie;
 
 -- Background workers legitimately run longer than an HTTP request.
 DO $do$
@@ -1776,11 +1790,12 @@ END
 $do$;
 ALTER ROLE app_worker SET statement_timeout = '120000ms';
 ALTER ROLE app_worker SET lock_timeout      = '10000ms';
+ALTER ROLE app_worker SET search_path       = cineatelie;
 
 -- Partition maintenance is the worker's job, and only through these SECURITY DEFINER
 -- functions — app_worker owns no partition and holds no CREATE on the schema.
-GRANT EXECUTE ON FUNCTION app.ensure_audit_log_partitions(int, int)   TO app_worker;
-GRANT EXECUTE ON FUNCTION app.drop_audit_log_partitions_before(date)  TO app_worker;
+GRANT EXECUTE ON FUNCTION cineatelie.ensure_audit_log_partitions(int, int)   TO app_worker;
+GRANT EXECUTE ON FUNCTION cineatelie.drop_audit_log_partitions_before(date)  TO app_worker;
 
 -- -------------------------------------------------------------------------------------
 -- 17. Reference / seed data (tenant-agnostic)

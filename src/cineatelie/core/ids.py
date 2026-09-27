@@ -1,7 +1,7 @@
 """UUIDv7 primary keys, generated application-side (ADR-002).
 
 This must produce bit-for-bit the same shape as the database's own generator,
-`app.uuid_generate_v7()` (db/baseline/00001_baseline.sql, section 0), so that a key minted
+`cineatelie.uuid_generate_v7()` (db/baseline/00001_baseline.sql, section 0), so that a key minted
 by the API, one minted by a migration's `DEFAULT`, and one minted by a seed script are
 indistinguishable and equally sortable. Layout (RFC 9562):
 
