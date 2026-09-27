@@ -31,7 +31,18 @@ CREATE SCHEMA IF NOT EXISTS cineatelie;
 -- instead — found by actually running this against a live Postgres: with `public` no
 -- longer on the path, `citext NOT NULL` on the very first table failed with
 -- "type citext does not exist", because the type had been created a schema away.
-SET search_path = cineatelie;
+--
+-- `extensions` is a second, fallback entry, not a second place of our own choosing:
+-- Supabase pre-installs `pgcrypto` in a schema literally called `extensions` before this
+-- baseline ever runs, so `CREATE EXTENSION IF NOT EXISTS pgcrypto` below is a silent no-op
+-- there — it already exists, just not where we assumed. Without `extensions` on the path,
+-- `cineatelie.uuid_generate_v7()`'s call to `gen_random_bytes()` fails with "function does
+-- not exist" on Supabase specifically, while working fine locally (plain `postgres:15` has
+-- no pre-installed pgcrypto, so our own `CREATE EXTENSION` truly creates it, in
+-- `cineatelie`, where the unqualified call already resolves). Listing `extensions` here
+-- costs nothing where it doesn't exist — an absent schema in `search_path` is silently
+-- skipped, never an error — and makes the same baseline correct on both.
+SET search_path = cineatelie, extensions;
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;   -- gen_random_bytes, digest, PGP column encryption
 CREATE EXTENSION IF NOT EXISTS citext;     -- case-insensitive e-mail
@@ -1198,6 +1209,17 @@ CREATE INDEX audit_log_entity_idx ON audit_log (entity_type, entity_id, occurred
 -- because the maintenance job lagged. It should stay empty; the job creates partitions ahead.
 CREATE TABLE audit_log_default PARTITION OF audit_log DEFAULT;
 
+-- A partitioned table's RLS policy is NOT automatically enforced on its partitions when a
+-- partition is queried directly by name (only when queried through the parent) — confirmed
+-- the hard way, by the isolation suite: `app_user`, no tenant context, querying
+-- `audit_log_default` directly returned real rows while the same query through `audit_log`
+-- correctly returned zero. ENABLE + FORCE here is what makes the parent's own policy apply
+-- to the partition too; no second policy needs creating, the existing one is inherited once
+-- this is on. Every future monthly partition needs the same two lines — see
+-- ensure_audit_log_partitions() below, where they are not optional either.
+ALTER TABLE audit_log_default ENABLE ROW LEVEL SECURITY;
+ALTER TABLE audit_log_default FORCE  ROW LEVEL SECURITY;
+
 -- Create the monthly partitions covering [now - p_months_back, now + p_months_ahead].
 -- Idempotent: run it as often as you like. Called by the housekeeping job.
 -- SECURITY DEFINER: creating and dropping partitions requires CREATE on the schema and
@@ -1210,7 +1232,7 @@ CREATE OR REPLACE FUNCTION cineatelie.ensure_audit_log_partitions(
 RETURNS int
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = cineatelie
+SET search_path = cineatelie, extensions
 AS $fn$
 DECLARE
     m           date;
@@ -1225,10 +1247,19 @@ BEGIN
                )::date
     LOOP
         part_name := format('audit_log_%s', to_char(m, 'YYYY_MM'));
-        IF to_regclass('public.' || part_name) IS NULL THEN
+        -- Schema-qualified: 'public.' here would make this check always miss (the schema
+        -- is cineatelie, not public) and re-attempt CREATE TABLE on a partition that
+        -- already exists, failing with "relation already exists" — a stale reference from
+        -- before the schema rename, caught only by re-running this function twice, which
+        -- the isolation suite's setup effectively did.
+        IF to_regclass('cineatelie.' || part_name) IS NULL THEN
             EXECUTE format(
                 'CREATE TABLE %I PARTITION OF audit_log FOR VALUES FROM (%L) TO (%L)',
                 part_name, m, (m + interval '1 month')::date);
+            -- See the comment on audit_log_default above: this does not happen
+            -- automatically for a partition, only for the parent.
+            EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', part_name);
+            EXECUTE format('ALTER TABLE %I FORCE  ROW LEVEL SECURITY', part_name);
             created := created + 1;
         END IF;
     END LOOP;
@@ -1242,7 +1273,7 @@ CREATE OR REPLACE FUNCTION cineatelie.drop_audit_log_partitions_before(p_cutoff 
 RETURNS int
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = cineatelie
+SET search_path = cineatelie, extensions
 AS $fn$
 DECLARE
     r        record;
@@ -1641,6 +1672,25 @@ GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA cineatelie TO app_user;
 ALTER DEFAULT PRIVILEGES IN SCHEMA cineatelie
     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_user;
 
+-- `extensions` on the search_path (section 0) is not enough on its own: Postgres also
+-- gates schema access by USAGE, independently of whether the schema resolves via
+-- search_path — confirmed the hard way, by the isolation suite, on Supabase specifically:
+-- `gen_random_bytes()` kept failing with "does not exist" even after search_path was
+-- fixed, because app_user had no USAGE on the schema pgcrypto actually lives in there.
+-- Conditional because `extensions` does not exist at all locally (plain `postgres:15` has
+-- no such schema) — an unconditional GRANT would fail the baseline outright there.
+--
+-- app_worker is deliberately not listed: it does not exist yet at this point in the
+-- script (created in section 16, below) and inherits this the same way it inherits every
+-- other grant made to app_user here — via `IN ROLE app_user`, not a separate GRANT.
+DO $do$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'extensions') THEN
+        GRANT USAGE ON SCHEMA extensions TO app_user, app_migrator;
+    END IF;
+END
+$do$;
+
 -- Reference tables are read-only for the application.
 REVOKE INSERT, UPDATE, DELETE ON roles, permissions, role_permissions, quotas, plan_quotas,
        features, plans, plan_features, measurement_fields FROM app_user;
@@ -1728,7 +1778,7 @@ RETURNS TABLE (
 LANGUAGE sql
 STABLE
 SECURITY DEFINER
-SET search_path = cineatelie
+SET search_path = cineatelie, extensions
 AS $fn$
     SELECT m.id, u.id, u.full_name, u.email, m.role_code, r.label_pt_br, m.status, m.accepted_at
       FROM memberships m
@@ -1750,7 +1800,7 @@ RETURNS TABLE (
 LANGUAGE sql
 STABLE
 SECURITY DEFINER
-SET search_path = cineatelie
+SET search_path = cineatelie, extensions
 AS $fn$
     SELECT t.id, t.slug, t.trade_name, t.logo_url, m.role_code, m.is_default,
            s.plan_code, COALESCE(s.is_within_window, false)
@@ -1774,11 +1824,11 @@ GRANT  EXECUTE ON FUNCTION fn_tenant_members(uuid), fn_my_tenants() TO app_user;
 ALTER ROLE app_user SET statement_timeout                   = '5000ms';
 ALTER ROLE app_user SET lock_timeout                        = '3000ms';
 ALTER ROLE app_user SET idle_in_transaction_session_timeout = '10000ms';
-ALTER ROLE app_user SET search_path                         = cineatelie;
+ALTER ROLE app_user SET search_path                         = cineatelie, extensions;
 -- app_migrator has no statement/lock timeout override (DDL legitimately runs long,
 -- database spec table "app_migrator | ... | none (DDL)"), but it does need this, so a
 -- *future* migration's unqualified CREATE TABLE also lands in cineatelie by default.
-ALTER ROLE app_migrator SET search_path                    = cineatelie;
+ALTER ROLE app_migrator SET search_path                    = cineatelie, extensions;
 
 -- Background workers legitimately run longer than an HTTP request.
 DO $do$
@@ -1790,7 +1840,7 @@ END
 $do$;
 ALTER ROLE app_worker SET statement_timeout = '120000ms';
 ALTER ROLE app_worker SET lock_timeout      = '10000ms';
-ALTER ROLE app_worker SET search_path       = cineatelie;
+ALTER ROLE app_worker SET search_path       = cineatelie, extensions;
 
 -- Partition maintenance is the worker's job, and only through these SECURITY DEFINER
 -- functions — app_worker owns no partition and holds no CREATE on the schema.
