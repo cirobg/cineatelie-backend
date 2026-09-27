@@ -19,6 +19,15 @@ Alembic's transaction would end it early and leave Alembic's own bookkeeping (wr
 `alembic_version`) to run outside the transaction this revision is supposed to be atomic
 with.
 
+Every literal `%` in the file is doubled to `%%` before it reaches `psycopg`. This is not
+optional: `psycopg` scans a query string for `%`-style placeholders even when no parameters
+are given, so the baseline's own Postgres-side `%` syntax — `RAISE EXCEPTION '... %'`,
+`format('%I %L')` — would otherwise raise `psycopg.ProgrammingError: incomplete
+placeholder`. `psycopg` reduces `%%` back to a single `%` before the string ever reaches the
+server, so what Postgres receives is byte-for-byte what the file says. (Found by actually
+running this migration against a live PostgreSQL 15 container — see
+`cineatelie/04-implementation/status-20260926-m0.md`.)
+
 After the baseline creates `app_user` and `app_worker` as `NOLOGIN` roles with every grant
 and RLS policy they need (schema section 15), this revision optionally gives them a
 password — but only if `APP_USER_PASSWORD` / `APP_WORKER_PASSWORD` are set in the
@@ -69,6 +78,13 @@ def _strip_outer_transaction(sql: str) -> str:
     return "\n".join(lines)
 
 
+def _escape_percent_for_psycopg(sql: str) -> str:
+    """Double every literal `%` so `psycopg` doesn't parse it as the start of a
+    placeholder (see module docstring). Safe unconditionally here: this file executes
+    with zero bound parameters, so there is no real placeholder to preserve."""
+    return sql.replace("%", "%%")
+
+
 def _sql_string_literal(value: str) -> str:
     """Escape `value` as a single-quoted SQL string literal (doubling embedded quotes —
     the standard, driver-independent escaping, correct under PostgreSQL's default
@@ -89,12 +105,16 @@ def _set_role_password_if_configured(conn, role: str, env_var: str) -> None:
     password = os.environ.get(env_var)
     if not password:
         return
-    conn.exec_driver_sql(f"ALTER ROLE {role} LOGIN PASSWORD {_sql_string_literal(password)}")
+    statement = f"ALTER ROLE {role} LOGIN PASSWORD {_sql_string_literal(password)}"
+    # A generated dev password is unlikely to contain '%', but a hand-chosen one might —
+    # escape unconditionally rather than assume.
+    conn.exec_driver_sql(_escape_percent_for_psycopg(statement))
 
 
 def upgrade() -> None:
     sql_text = _BASELINE_SQL_PATH.read_text(encoding="utf-8")
     sql_text = _strip_outer_transaction(sql_text)
+    sql_text = _escape_percent_for_psycopg(sql_text)
 
     conn = op.get_bind()
     conn.exec_driver_sql(sql_text)

@@ -7,7 +7,7 @@ WORKDIR /app
 
 # psycopg[binary] and asyncpg both ship prebuilt wheels for this platform, so no compiler
 # toolchain is needed here — keeps the image small and the build fast.
-COPY pyproject.toml ./
+COPY pyproject.toml README.md ./
 COPY src ./src
 COPY db ./db
 COPY alembic.ini ./

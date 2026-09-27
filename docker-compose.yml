@@ -18,7 +18,8 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:-app_migrator_dev_password}
       POSTGRES_DB: cineatelie
     ports:
-      - "5432:5432"
+      # Overridable: a developer machine sometimes already has something bound to 5432.
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - cineatelie_pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -56,7 +57,7 @@ services:
       # meant to need it (launch dependency A0).
       CORS_ALLOWED_ORIGINS: http://localhost:5173
     ports:
-      - "8000:8000"
+      - "${API_HOST_PORT:-8000}:8000"
 
 volumes:
   cineatelie_pgdata:
