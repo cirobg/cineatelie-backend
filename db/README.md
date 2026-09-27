@@ -47,15 +47,38 @@ you with a fully working, loginable set of roles. This is why `db/roles/*.sql` a
 needed locally.
 
 **Every other environment** (Supabase, a bare PostgreSQL instance) does not get that
-free bootstrap. There, an administrator runs, once, in this order:
+free bootstrap, but it turns out not to need `db/roles/app_migrator.sql` first either —
+verified against a real Supabase project (2026-09-27). The simpler, equally correct order:
 
-1. `db/roles/app_migrator.sql` — as whatever admin connection the provider gives you.
-2. `alembic upgrade head`, connected as `app_migrator` (`MIGRATION_DATABASE_URL`).
-3. `db/roles/app_user.sql` and `db/roles/app_worker.sql` — as `app_migrator` (it holds
-   `CREATEROLE`) or the same admin connection.
+1. Run `alembic upgrade head` directly as whatever admin connection the provider gives you
+   (Supabase's own `postgres` role, reached through the pooler; a bare instance's
+   superuser) — set as `MIGRATION_DATABASE_URL` for this one run. The baseline creates
+   `app_user`, `app_worker` **and** `app_migrator` itself, all `NOLOGIN`, as a normal part
+   of applying schema section 15. There is nothing `app_migrator.sql` would add yet,
+   because nothing needs `app_migrator` to already exist for this first run.
+2. `db/roles/app_user.sql`, `db/roles/app_worker.sql` and `db/roles/app_migrator.sql` —
+   run once, still as that same admin connection, to give the three roles real passwords.
+   From here on, `MIGRATION_DATABASE_URL` can point at `app_migrator` for every
+   *subsequent* migration, instead of the platform's own admin role.
 
 Each file takes a `password` psql variable and is never given a real value in git; it is
-supplied at run time from whatever secret manager the environment uses.
+supplied at run time from whatever secret manager the environment uses. (This project has
+no `psql` client handy in its usual shells — the same `ALTER ROLE ... PASSWORD` these
+files run works identically issued through any Postgres client; what matters is the SQL,
+not the tool.)
+
+**One `ALTER ROLE ... PASSWORD` cannot be a bound parameter.** Postgres's grammar for it
+takes a string literal, not a placeholder — confirmed by trying it (`psycopg.errors.
+SyntaxError: syntax error at or near "$1"`). `db/versions/20260926_0001_baseline.py`
+handles this by escaping the value as a SQL string literal (doubling embedded quotes)
+rather than binding it; do the same anywhere else a password needs to reach an `ALTER
+ROLE` statement programmatically.
+
+**Supabase's pooler needs the project ref in the username.** Connecting through
+Supavisor (`*.pooler.supabase.com`), every role's username must be `<role>.<project-ref>`
+— e.g. `app_user.abcdefghijklmnop`, not bare `app_user` — or the pooler refuses the
+connection with `FATAL: no tenant identifier provided`. The project ref is the same one
+already in the admin connection string Supabase gives you.
 
 ## Reseeding reference data
 

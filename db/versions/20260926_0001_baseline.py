@@ -88,9 +88,10 @@ def _escape_percent_for_psycopg(sql: str) -> str:
 def _sql_string_literal(value: str) -> str:
     """Escape `value` as a single-quoted SQL string literal (doubling embedded quotes —
     the standard, driver-independent escaping, correct under PostgreSQL's default
-    `standard_conforming_strings = on`). Used instead of a bound parameter so this
-    statement executes the same way `exec_driver_sql` already runs the baseline above:
-    one plain string, no driver-specific paramstyle to get right."""
+    `standard_conforming_strings = on`). Not optional: `ALTER ROLE ... PASSWORD` takes a
+    string literal in its grammar, not an expression, so a bound parameter fails outright
+    (`psycopg.errors.SyntaxError: syntax error at or near "$1"` — confirmed by trying it).
+    """
     return "'" + value.replace("'", "''") + "'"
 
 
