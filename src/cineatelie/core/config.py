@@ -51,6 +51,9 @@ class Settings(BaseSettings):
     supabase_url: str = Field(default="", alias="SUPABASE_URL")
     supabase_service_role_key: str = Field(default="", alias="SUPABASE_SERVICE_ROLE_KEY")
 
+    # Billing (M2). Empty = no upgrade link anywhere (backend spec OI-15: never a dead link).
+    billing_upgrade_url: str = Field(default="", alias="BILLING_UPGRADE_URL")
+
     # --- CORS (ADR-015; empty while behind the same-origin proxy, launch dependency A0) -
     cors_allowed_origins: str = Field(default="", alias="CORS_ALLOWED_ORIGINS")
 
