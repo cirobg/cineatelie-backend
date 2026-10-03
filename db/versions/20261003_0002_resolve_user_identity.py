@@ -27,7 +27,8 @@ branch_labels: Sequence[str] | None = None
 depends_on: Sequence[str] | None = None
 
 _RESOLVE_USER_IDENTITY_SQL = """
-CREATE OR REPLACE FUNCTION cineatelie.fn_resolve_user_identity(p_provider text, p_provider_subject text)
+CREATE OR REPLACE FUNCTION cineatelie.fn_resolve_user_identity(
+    p_provider text, p_provider_subject text)
 RETURNS uuid
 LANGUAGE sql
 STABLE

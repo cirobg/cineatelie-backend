@@ -235,3 +235,24 @@ async def test_owner_reads_the_subscription_and_invoices(
     assert subscription.json()["plan_code"] == "starter"
     assert invoices.status_code == 200
     assert invoices.json() == []  # no gateway yet, so no invoices
+
+
+async def test_entitlement_view_only_returns_the_callers_own_tenant(
+    session_factory: async_sessionmaker,
+    tenant_a: TenantFixture,
+    tenant_b: TenantFixture,
+) -> None:
+    """Regression test for migration 0003. A view runs with its owner's rights unless it is
+    `security_invoker`, so a view owned by a role that bypasses RLS would return every tenant's
+    subscription to `app_user`. Both tenants have an active window here, so a leak shows up as
+    tenant_a's id appearing in tenant_b's results."""
+    await _add_subscription(session_factory, tenant=tenant_a, active=True)
+    await _add_subscription(session_factory, tenant=tenant_b, active=True)
+
+    async with UnitOfWork(session_factory, tenant_id=tenant_b.id) as uow:
+        rows = (
+            await uow.session.execute(text("SELECT tenant_id FROM v_active_subscription"))
+        ).all()
+
+    tenant_ids = {str(row.tenant_id) for row in rows}
+    assert tenant_ids == {str(tenant_b.id)}
