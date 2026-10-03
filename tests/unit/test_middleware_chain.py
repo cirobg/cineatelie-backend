@@ -178,3 +178,32 @@ def test_edge_verification_enabled_accepts_the_correct_secret() -> None:
 
     response = TestClient(app).get("/", headers={HEADER_NAME: "s3cr3t"})
     assert response.status_code == 200
+
+
+def test_cors_headers_reach_error_responses_when_cors_is_registered_last() -> None:
+    """A browser can only read an error body if CORS headers are on it. CORSMiddleware must
+    be the outermost layer (registered last), or ErrorHandlerMiddleware's envelopes bypass it
+    entirely -- the failure that showed up as 'No Access-Control-Allow-Origin' on a 401."""
+    from starlette.middleware.cors import CORSMiddleware
+
+    class _RaisesInMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):
+            raise AppError(code="unauthenticated", message="no", status_code=401)
+
+    app = Starlette(routes=[Route("/", _ok)])
+    app.add_middleware(_RaisesInMiddleware)
+    app.add_middleware(ErrorHandlerMiddleware)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:5173"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    response = TestClient(app, raise_server_exceptions=False).get(
+        "/", headers={"Origin": "http://localhost:5173"}
+    )
+
+    assert response.status_code == 401
+    assert response.headers["access-control-allow-origin"] == "http://localhost:5173"

@@ -80,19 +80,6 @@ app.state.session_factory = session_factory
 app.state.identity_provider = identity_provider
 app.state.jwks_cache = jwks_cache
 
-# Empty by default: the SPA reaches this API through the same-origin Cloudflare Pages
-# Function proxy while no domain is bought (launch dependency A0), so same-origin requests
-# need no CORS at all. Set CORS_ALLOWED_ORIGINS only for a deployment that calls this API
-# cross-origin directly.
-if settings.cors_allowed_origins_list:
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=settings.cors_allowed_origins_list,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-
 register_middleware(
     app,
     identity_provider=identity_provider,
@@ -102,6 +89,20 @@ register_middleware(
     edge_shared_secret=settings.edge_shared_secret,
     api_v1_prefix=settings.api_v1_prefix,
 )
+
+# Registered after the chain, so it is the outermost user middleware: a browser can only
+# read an error response if CORS headers are on it, and ErrorHandlerMiddleware builds every
+# error envelope. Registered earlier, CORS sat inside the chain and 401s came back with no
+# Access-Control-Allow-Origin. Empty by default: same-origin requests (the Cloudflare Pages
+# proxy, launch dependency A0) need no CORS at all.
+if settings.cors_allowed_origins_list:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_allowed_origins_list,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 app.include_router(identity_router, prefix=settings.api_v1_prefix)
 
