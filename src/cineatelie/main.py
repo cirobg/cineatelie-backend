@@ -26,6 +26,7 @@ from cineatelie import __version__
 from cineatelie.core.config import get_settings
 from cineatelie.core.logging import configure_logging
 from cineatelie.modules.billing.adapters.router import router as billing_router
+from cineatelie.modules.catalog.adapters.router import router as catalog_router
 from cineatelie.modules.identity.adapters.router import router as identity_router
 from cineatelie.platform.auth.jwks import JwksCache
 from cineatelie.platform.auth.ports import IdentityProvider
@@ -107,6 +108,7 @@ if settings.cors_allowed_origins_list:
 
 app.include_router(identity_router, prefix=settings.api_v1_prefix)
 app.include_router(billing_router, prefix=settings.api_v1_prefix)
+app.include_router(catalog_router, prefix=settings.api_v1_prefix)
 
 
 @app.get("/healthz")
