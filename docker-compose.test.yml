@@ -1,0 +1,33 @@
+# Local, disposable PostgreSQL for development and tests (owner decision, 2026-10-03).
+#
+# The Supabase dev project is the validation environment (where the owner logs in and keeps
+# real data). Tests and local development run here instead, so they never touch Supabase.
+# This database can be reset freely: `docker compose -f docker-compose.test.yml down -v`.
+# Nothing here is ever used for the apps that the owner validates; see docker-compose.yml.
+#
+# Container and volume are prefixed `cineatelie`. The host port is separate from the
+# Supabase stack and from anything else on the machine.
+
+services:
+  test-db:
+    image: postgres:17
+    container_name: cineatelie-test-db
+    environment:
+      # Same bootstrap as before: POSTGRES_USER is the superuser on first start, so the baseline
+      # (which creates the roles and extensions) can run as app_migrator, as in the other envs.
+      POSTGRES_USER: app_migrator
+      POSTGRES_PASSWORD: ${TEST_POSTGRES_PASSWORD:-app_migrator_test_password}
+      POSTGRES_DB: cineatelie
+    ports:
+      - "${TEST_POSTGRES_HOST_PORT:-5433}:5432"
+    volumes:
+      - cineatelie_test_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app_migrator -d cineatelie"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  cineatelie_test_pgdata:
+    name: cineatelie_test_pgdata

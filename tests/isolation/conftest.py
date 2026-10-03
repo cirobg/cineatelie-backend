@@ -19,6 +19,7 @@ import os
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 import pytest
 import pytest_asyncio
@@ -33,6 +34,15 @@ def _database_url() -> str:
     url = os.environ.get("DATABASE_URL")
     if not url:
         pytest.skip("DATABASE_URL not set — the isolation suite needs a real, migrated database")
+    # Tests create and delete fixture rows. The Supabase dev project is the owner's validation
+    # environment and must never receive them (owner decision, 2026-10-03). Checked by host
+    # only, and the message never includes the URL, because it carries a password.
+    host = urlsplit(url.replace("+asyncpg", "").replace("+psycopg", "")).hostname or ""
+    if "supabase" in host:
+        pytest.fail(
+            "DATABASE_URL points at a Supabase host. Tests must run against the local test "
+            "database (docker-compose.test.yml); see 05-scripts/test-backend.sh."
+        )
     return url
 
 

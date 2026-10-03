@@ -92,11 +92,11 @@ class SupabaseIdentityProvider:
 
         subject = claims["sub"]
         email = claims.get("email", "")
-        # Supabase does not document a single stable location for this across every signup
-        # path (top-level `email_verified` vs. `user_metadata.email_verified`, the latter
-        # populated by the Google OAuth flow this project actually uses). Checked against a
-        # real Google-issued token once Google sign-in is enabled on the project (tracked
-        # alongside modules/identity, which is the first consumer of this field).
+        # Checked 2026-10-03 against a real Google-issued token: there is no top-level
+        # `email_verified` claim. The value is `user_metadata.email_verified` (true for Google
+        # logins). Caveat: Supabase lets the user write `user_metadata`, so this flag is only as
+        # trustworthy as the provider check next to it. Pair it with `app_metadata.provider ==
+        # "google"` before any feature that links accounts by email.
         email_verified = bool(
             claims.get("email_verified") or claims.get("user_metadata", {}).get("email_verified")
         )
