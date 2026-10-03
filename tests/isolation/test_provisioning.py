@@ -119,12 +119,18 @@ async def test_new_identity_creates_a_full_default_workspace(
     async with UnitOfWork(session_factory, tenant_id=tenant_id) as uow:
         subscription = (
             await uow.session.execute(
-                text("SELECT plan_code, status FROM subscriptions WHERE tenant_id = :tenant_id"),
+                text(
+                    "SELECT plan_code, status, price_amount, currency_code FROM subscriptions "
+                    "WHERE tenant_id = :tenant_id"
+                ),
                 {"tenant_id": str(tenant_id)},
             )
         ).one()
     assert subscription.plan_code == "trial"
     assert subscription.status == "trialing"
+    # The price snapshot is copied from the plan (BR-SUB-01): a trial snapshots 0 BRL, not null.
+    assert subscription.price_amount == 0
+    assert subscription.currency_code == "BRL"
 
 
 async def test_known_identity_resolves_without_creating_a_second_tenant(

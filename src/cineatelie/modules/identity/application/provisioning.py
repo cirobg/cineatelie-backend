@@ -381,11 +381,15 @@ async def _run_provisioning_transaction(
                 },
             )
 
+        # The price is snapshotted from the plan at sale time (BR-SUB-01), so it is copied here, not
+        # left null: a trial's snapshot is the plan's price, which is 0 (BR-SUB-04, BR-SUB-06).
         await session.execute(
             text(
                 "INSERT INTO subscriptions "
-                "(tenant_id, plan_code, status, starts_on, ends_on, trial_ends_on) "
-                "VALUES (:tenant_id, 'trial', 'trialing', :starts_on, :ends_on, :trial_ends_on)"
+                "(tenant_id, plan_code, status, starts_on, ends_on, trial_ends_on, "
+                "price_amount, currency_code) "
+                "SELECT :tenant_id, p.code, 'trialing', :starts_on, :ends_on, :trial_ends_on, "
+                "p.price_amount, p.currency_code FROM plans p WHERE p.code = 'trial'"
             ),
             {
                 "tenant_id": str(tenant_id),
